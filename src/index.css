@@ -1,0 +1,31 @@
+@import 'tailwindcss';
+
+@theme {
+  --font-sans: 'Inter', ui-sans-serif, system-ui, sans-serif;
+  /* Marca Zapifica */
+  --color-brand-50: #f7f0fc;
+  --color-brand-100: #ecd9f7;
+  --color-brand-200: #d4b0ed;
+  --color-brand-500: #7a1ac4;
+  --color-brand-600: #6a00b8;
+  --color-brand-700: #560099;
+  --color-brand-green: #25d366;
+  --color-brand-green-dark: #1db956;
+  --color-zapifica-950: #0c0e14;
+  --color-zapifica-900: #12151c;
+  --color-zapifica-800: #1a1f2a;
+}
+
+@layer base {
+  html {
+    @apply antialiased;
+  }
+
+  body {
+    @apply m-0 min-h-dvh bg-zinc-50 text-zinc-900;
+  }
+
+  #root {
+    @apply min-h-dvh w-full max-w-none border-0 text-left;
+  }
+}
