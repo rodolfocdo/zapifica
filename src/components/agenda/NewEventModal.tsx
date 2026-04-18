@@ -47,6 +47,26 @@ function toTimeInputValue(d: Date) {
 }
 
 /** Interpreta data/hora no fuso local do navegador (componentes nativos). */
+/** Mensagem legível a partir do objeto `error` do PostgREST / exceções. */
+function textoErroParaUsuario(err: unknown): string {
+  if (err == null) return 'Erro desconhecido (null/undefined).'
+  if (typeof err === 'string') return err
+  if (err instanceof Error && err.message) return err.message
+  if (typeof err === 'object') {
+    const o = err as Record<string, unknown>
+    const parts = [o.message, o.details, o.hint, o.code]
+      .map((v) => (typeof v === 'string' ? v : v != null ? String(v) : ''))
+      .filter(Boolean)
+    if (parts.length) return parts.join(' | ')
+    try {
+      return JSON.stringify(err)
+    } catch {
+      return String(err)
+    }
+  }
+  return String(err)
+}
+
 function parseLocalDateTime(dateStr: string, timeStr: string): Date | null {
   const [y, m, day] = dateStr.split('-').map(Number)
   const parts = timeStr.split(':').map(Number)
@@ -197,120 +217,139 @@ export function NewEventModal({
 
     setSubmitting(true)
 
-    const ownerId = user.id
-    const startAtUtc = start.toISOString()
-    const endAtUtc = end.toISOString()
-    console.log(
-      '[Agenda] Passo 1 — criar evento no calendário (RLS exige user_id =',
-      ownerId,
-      ') start_at/end_at UTC:',
-      startAtUtc,
-      endAtUtc,
-    )
-
-    const eventoRow = {
-      user_id: ownerId,
-      title: t,
-      category,
-      client_id: clientId || null,
-      start_at: startAtUtc,
-      end_at: endAtUtc,
-      sync_kanban: syncKanban,
-    }
-
-    const { data: eventoCriado, error: evErr } = await supabase
-      .from('events')
-      .insert(eventoRow)
-      .select('id, user_id')
-      .single()
-
-    if (evErr || !eventoCriado) {
-      setSubmitting(false)
-      setError(
-        evErr?.message?.includes('relation')
-          ? 'Tabelas da agenda ainda não criadas. Execute a migração no Supabase.'
-          : (evErr?.message ?? 'Não foi possível salvar o evento.'),
-      )
-      return
-    }
-
-    if (eventoCriado.user_id !== ownerId) {
-      console.warn(
-        '[Agenda] Atenção: user_id retornado difere do usuário logado.',
-        eventoCriado.user_id,
+    try {
+      const ownerId = user.id
+      const startAtUtc = start.toISOString()
+      const endAtUtc = end.toISOString()
+      console.log(
+        '[Agenda] Passo 1 — criar evento no calendário (RLS exige user_id =',
         ownerId,
+        ') start_at/end_at UTC:',
+        startAtUtc,
+        endAtUtc,
       )
-    }
 
-    console.log(
-      '[Agenda] Evento gravado — id:',
-      eventoCriado.id,
-      '| user_id:',
-      eventoCriado.user_id,
-    )
+      const eventoRow = {
+        user_id: ownerId,
+        title: t,
+        category,
+        client_id: clientId || null,
+        start_at: startAtUtc,
+        end_at: endAtUtc,
+        sync_kanban: syncKanban,
+      }
 
-    /**
-     * Passo 2 (obrigatório, fluxo tipo transação com o passo 1):
-     * sempre uma linha em `scheduled_messages` ligada ao `event_id`.
-     * Com lembrete Evolution: is_active true + scheduled_at em UTC (.toISOString).
-     * Sem lembrete: stub (is_active false, cancelado) para manter 1:1 sem disparo.
-     */
-    const lembreteEvolutionLigado = Boolean(dispatchActive && dispatchAt)
-    const scheduledAtUtcIso = lembreteEvolutionLigado
-      ? dispatchAt!.toISOString()
-      : null
+      const { data: eventoCriado, error: evErr } = await supabase
+        .from('events')
+        .insert(eventoRow)
+        .select('id, user_id')
+        .single()
 
-    const mensagemAgendadaRow = lembreteEvolutionLigado
-      ? {
-          event_id: eventoCriado.id,
-          user_id: ownerId,
-          is_active: true,
-          recipient_type: recipientType,
-          content_type: contentType,
-          message_body: messageBody.trim() || null,
-          scheduled_at: scheduledAtUtcIso,
-          status: 'pending' as const,
-          segment_lead_ids:
-            recipientType === 'segment' ? [...segmentIds] : [],
-        }
-      : {
-          event_id: eventoCriado.id,
-          user_id: ownerId,
-          is_active: false,
-          recipient_type: 'personal' as const,
-          content_type: 'text' as const,
-          message_body: null,
-          scheduled_at: null,
-          status: 'cancelled' as const,
-          segment_lead_ids: [] as string[],
-        }
+      if (evErr || !eventoCriado) {
+        const det = textoErroParaUsuario(evErr)
+        setError(
+          det.includes('relation') || det.includes('does not exist')
+            ? 'Tabelas da agenda ainda não criadas. Execute a migração no Supabase.'
+            : `Passo 1 (events): ${det}`,
+        )
+        return
+      }
 
-    console.log(
-      '[Agenda] Passo 2 — scheduled_messages | event_id:',
-      eventoCriado.id,
-      '| user_id:',
-      ownerId,
-      '| is_active:',
-      mensagemAgendadaRow.is_active,
-      '| scheduled_at (UTC ISO ou null):',
-      scheduledAtUtcIso,
-    )
+      if (eventoCriado.user_id !== ownerId) {
+        console.warn(
+          '[Agenda] Atenção: user_id retornado difere do usuário logado.',
+          eventoCriado.user_id,
+          ownerId,
+        )
+      }
 
-    const { error: smErr } = await supabase
-      .from('scheduled_messages')
-      .insert(mensagemAgendadaRow)
+      console.log(
+        '[Agenda] Evento gravado — id:',
+        eventoCriado.id,
+        '| user_id:',
+        eventoCriado.user_id,
+      )
 
-    if (smErr) {
-      await supabase.from('events').delete().eq('id', eventoCriado.id)
+      /**
+       * Passo 2 (obrigatório, fluxo tipo transação com o passo 1):
+       * sempre uma linha em `scheduled_messages` ligada ao `event_id`.
+       * Com lembrete Evolution: is_active true + scheduled_at em UTC (.toISOString).
+       * Sem lembrete: stub (is_active false, cancelado) para manter 1:1 sem disparo.
+       */
+      const lembreteEvolutionLigado = Boolean(dispatchActive && dispatchAt)
+      const scheduledAtUtcIso = lembreteEvolutionLigado
+        ? dispatchAt!.toISOString()
+        : null
+
+      const mensagemAgendadaRow = lembreteEvolutionLigado
+        ? {
+            event_id: eventoCriado.id,
+            user_id: ownerId,
+            is_active: true,
+            recipient_type: recipientType,
+            content_type: contentType,
+            message_body: messageBody.trim() || null,
+            scheduled_at: scheduledAtUtcIso,
+            status: 'pending' as const,
+            segment_lead_ids:
+              recipientType === 'segment' ? [...segmentIds] : [],
+          }
+        : {
+            event_id: eventoCriado.id,
+            user_id: ownerId,
+            is_active: false,
+            recipient_type: 'personal' as const,
+            content_type: 'text' as const,
+            message_body: null,
+            scheduled_at: null,
+            status: 'cancelled' as const,
+            segment_lead_ids: [] as string[],
+          }
+
+      console.log(
+        '[Agenda] Passo 2 — scheduled_messages | event_id:',
+        eventoCriado.id,
+        '| user_id:',
+        ownerId,
+        '| is_active:',
+        mensagemAgendadaRow.is_active,
+        '| scheduled_at (UTC ISO ou null):',
+        scheduledAtUtcIso,
+      )
+
+      const { error: smErr } = await supabase
+        .from('scheduled_messages')
+        .insert(mensagemAgendadaRow)
+
+      if (smErr) {
+        await supabase.from('events').delete().eq('id', eventoCriado.id)
+        setError(
+          `Passo 2 (scheduled_messages): ${textoErroParaUsuario(smErr)}`,
+        )
+        return
+      }
+
+      await Promise.resolve(onSaved())
+      reinicializarCamposDoModal()
+      onClose()
+    } catch (err) {
+      console.error(
+        '================================================================================',
+      )
+      console.error('[Agenda] ERRO FATAL NO SALVAMENTO DO MODAL (catch):', err)
+      console.error(
+        '[Agenda] stack:',
+        err instanceof Error ? err.stack : '(sem stack)',
+      )
+      console.error(
+        '================================================================================',
+      )
+      setError(
+        `Erro ao agendar lembrete: ${textoErroParaUsuario(err)}`,
+      )
+    } finally {
       setSubmitting(false)
-      setError(smErr.message ?? 'Erro ao salvar a fila de disparo vinculada ao evento.')
-      return
     }
-
-    setSubmitting(false)
-    await Promise.resolve(onSaved())
-    reinicializarCamposDoModal()
-    onClose()
   }
 
   function handleClose() {

@@ -384,9 +384,19 @@ async function checkAndSendScheduledMessages(
 
   async function marcarErroNaLinha(
     id: string,
-    motivo: string,
+    erroOriginal: string,
   ): Promise<void> {
-    const texto = motivo.slice(0, 4000)
+    console.error(
+      '================================================================================',
+    )
+    console.error('[worker] ERRO FATAL NO DISPARO (motivo original, ANTES do UPDATE):')
+    console.error('[worker]', erroOriginal)
+    console.error('[worker] scheduled_messages.id:', id)
+    console.error(
+      '================================================================================',
+    )
+
+    const texto = erroOriginal.slice(0, 4000)
     const { error: upErr } = await supabase
       .from('scheduled_messages')
       .update({
@@ -396,12 +406,28 @@ async function checkAndSendScheduledMessages(
       })
       .eq('id', id)
       .in('status', ['pending', 'processing'])
+
     if (upErr) {
       console.error(
-        '[worker] Não foi possível gravar status=error em',
-        id,
+        '[worker] UPDATE com last_error falhou — tentando só status=error. Supabase:',
         upErr.message,
+        JSON.stringify(upErr),
       )
+      const { error: upErrFallback } = await supabase
+        .from('scheduled_messages')
+        .update({
+          status: 'error',
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', id)
+        .in('status', ['pending', 'processing'])
+      if (upErrFallback) {
+        console.error(
+          '[worker] Fallback (só status) também falhou:',
+          upErrFallback.message,
+          JSON.stringify(upErrFallback),
+        )
+      }
     }
   }
 
