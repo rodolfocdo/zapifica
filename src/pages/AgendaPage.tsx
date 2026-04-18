@@ -193,6 +193,45 @@ function maskPersonalPhone(user: User | null): string {
   return `+55 ***** ${last}`
 }
 
+/** Mesma prioridade que o worker usava em auth (phone → metadata). */
+function pickPersonalRawFromUser(user: User | null): string | null {
+  if (!user) return null
+  const meta = user.user_metadata ?? {}
+  const fromMeta =
+    (typeof meta.whatsapp === 'string' && meta.whatsapp.trim()) ||
+    (typeof meta.phone === 'string' && meta.phone.trim()) ||
+    ''
+  if (user.phone?.trim()) return user.phone.trim()
+  if (fromMeta) return fromMeta
+  return null
+}
+
+/** Exibição amigável no chip quando já temos o número resolvido (auth ou profiles). */
+function formatBrFromDigits(raw: string): string {
+  const d = raw.replace(/\D/g, '')
+  if (!d) return raw.trim() || '+55 —'
+  if (d.startsWith('55') && d.length >= 12) {
+    const rest = d.slice(2)
+    const dd = rest.slice(0, 2)
+    const num = rest.slice(2)
+    if (num.length === 9) {
+      return `+55 ${dd} ${num.slice(0, 5)}-${num.slice(5)}`
+    }
+    if (num.length === 8) {
+      return `+55 ${dd} ${num.slice(0, 4)}-${num.slice(4)}`
+    }
+    return `+55 ${dd} ${num}`
+  }
+  if (d.length >= 10) {
+    const dd = d.slice(0, 2)
+    const num = d.slice(2)
+    if (num.length === 9) {
+      return `+55 ${dd} ${num.slice(0, 5)}-${num.slice(5)}`
+    }
+  }
+  return `+${d}`
+}
+
 export function AgendaPage() {
   const [tab, setTab] = useState<'calendario' | 'historico'>('calendario')
   const [view, setView] = useState<CalendarView>('day')
@@ -206,6 +245,7 @@ export function AgendaPage() {
     hour: 9,
   })
   const [user, setUser] = useState<User | null>(null)
+  const [personalPhoneRaw, setPersonalPhoneRaw] = useState<string | null>(null)
 
   /** Janela ampla para histórico e navegação sem refetch a cada mudança de data */
   const syncWindow = useMemo(() => {
@@ -250,9 +290,29 @@ export function AgendaPage() {
   }, [fetchEvents])
 
   useEffect(() => {
-    void supabase.auth.getUser().then(({ data: { user: u } }) => {
+    void (async () => {
+      const {
+        data: { user: u },
+      } = await supabase.auth.getUser()
       setUser(u)
-    })
+      if (!u) {
+        setPersonalPhoneRaw(null)
+        return
+      }
+      let raw = pickPersonalRawFromUser(u)
+      if (!raw) {
+        const { data: prof, error } = await supabase
+          .from('profiles')
+          .select('phone, whatsapp')
+          .eq('id', u.id)
+          .maybeSingle()
+        if (!error && prof) {
+          const p = prof as { phone?: string | null; whatsapp?: string | null }
+          raw = (p.phone?.trim() || p.whatsapp?.trim()) ?? null
+        }
+      }
+      setPersonalPhoneRaw(raw)
+    })()
   }, [])
 
   const headerDateLabel = useMemo(() => {
@@ -307,6 +367,13 @@ export function AgendaPage() {
   }, [cursor])
 
   const monthWeeks = useMemo(() => monthMatrix(cursor), [cursor])
+
+  const personalPhoneDisplay = useMemo(() => {
+    if (personalPhoneRaw?.trim()) {
+      return formatBrFromDigits(personalPhoneRaw)
+    }
+    return maskPersonalPhone(user)
+  }, [personalPhoneRaw, user])
 
   const historico = useMemo(() => {
     const now = Date.now()
@@ -765,7 +832,8 @@ export function AgendaPage() {
         onClose={() => setModalOpen(false)}
         initialDate={modalSeed.date}
         initialHour={modalSeed.hour}
-        maskedPersonalPhone={maskPersonalPhone(user)}
+        personalPhoneDisplay={personalPhoneDisplay}
+        personalPhoneRaw={personalPhoneRaw}
         onSaved={async () => {
           await fetchEvents()
         }}

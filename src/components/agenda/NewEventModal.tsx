@@ -21,7 +21,13 @@ type NewEventModalProps = {
   initialDate: Date
   /** Hora inicial sugerida (0–23) ao clicar na grade */
   initialHour: number
-  maskedPersonalPhone: string
+  /** Texto do chip “Enviar para …” (pode ser formatado a partir do raw). */
+  personalPhoneDisplay: string
+  /**
+   * Telefone do lembrete pessoal (como na Evolution: dígitos ou E.164).
+   * Gravado em `scheduled_messages.recipient_phone` para o worker não depender de auth.
+   */
+  personalPhoneRaw: string | null
   /** Recarrega a agenda no pai; pode ser async para aguardar o fetch antes de fechar o modal. */
   onSaved: () => void | Promise<void>
 }
@@ -82,7 +88,8 @@ export function NewEventModal({
   onClose,
   initialDate,
   initialHour,
-  maskedPersonalPhone,
+  personalPhoneDisplay,
+  personalPhoneRaw,
   onSaved,
 }: NewEventModalProps) {
   const [title, setTitle] = useState('')
@@ -204,6 +211,15 @@ export function NewEventModal({
         setError('Selecione ao menos um cliente com telefone no segmento.')
         return
       }
+      if (
+        recipientType === 'personal' &&
+        !(personalPhoneRaw?.trim())
+      ) {
+        setError(
+          'Não encontramos seu telefone para o lembrete pessoal. Atualize seu perfil ou cadastre o número no app e tente de novo.',
+        )
+        return
+      }
     }
 
     const {
@@ -288,6 +304,11 @@ export function NewEventModal({
         ? dispatchAt!.toISOString()
         : null
 
+      const recipientPhoneRow =
+        lembreteEvolutionLigado && recipientType === 'personal'
+          ? personalPhoneRaw?.trim() ?? null
+          : null
+
       const mensagemAgendadaRow = lembreteEvolutionLigado
         ? {
             event_id: eventoCriado.id,
@@ -300,6 +321,7 @@ export function NewEventModal({
             status: 'pending' as const,
             segment_lead_ids:
               recipientType === 'segment' ? [...segmentIds] : [],
+            recipient_phone: recipientPhoneRow,
           }
         : {
             event_id: eventoCriado.id,
@@ -311,6 +333,7 @@ export function NewEventModal({
             scheduled_at: null,
             status: 'cancelled' as const,
             segment_lead_ids: [] as string[],
+            recipient_phone: null,
           }
 
       console.log(
@@ -601,7 +624,7 @@ export function NewEventModal({
                               seu perfil — sem digitar manualmente.
                             </p>
                             <p className="mt-3 rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2 text-xs font-medium tabular-nums text-zinc-700">
-                              Enviar para {maskedPersonalPhone}
+                              Enviar para {personalPhoneDisplay}
                             </p>
                           </div>
                         </div>

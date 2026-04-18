@@ -57,6 +57,7 @@ type ScheduledRow = {
   content_type: 'text' | 'audio' | 'image'
   message_body: string | null
   segment_lead_ids: string[] | null
+  recipient_phone?: string | null
 }
 
 const BATCH_LIMIT = 30
@@ -75,11 +76,40 @@ function pickPersonalRawFromUser(user: {
   return null
 }
 
+async function resolvePersonalPhoneFromProfile(
+  supabase: SupabaseClient,
+  userId: string,
+): Promise<string | null> {
+  const { data, error } = await supabase
+    .from('profiles')
+    .select('phone, whatsapp')
+    .eq('id', userId)
+    .maybeSingle()
+  if (error || !data) return null
+  const o = data as Record<string, unknown>
+  const p = typeof o.phone === 'string' ? o.phone.trim() : ''
+  const w = typeof o.whatsapp === 'string' ? o.whatsapp.trim() : ''
+  return p || w || null
+}
+
 async function resolveRecipientPhones(
   supabase: SupabaseClient,
   row: ScheduledRow,
 ): Promise<{ targets: string[]; error: string | null }> {
   if (row.recipient_type === 'personal') {
+    const inline = row.recipient_phone?.trim()
+    if (inline) {
+      return { targets: [inline], error: null }
+    }
+
+    const fromProfile = await resolvePersonalPhoneFromProfile(
+      supabase,
+      row.user_id,
+    )
+    if (fromProfile?.trim()) {
+      return { targets: [fromProfile.trim()], error: null }
+    }
+
     const { data, error } = await supabase.auth.admin.getUserById(row.user_id)
     if (error || !data?.user) {
       return {
@@ -92,7 +122,7 @@ async function resolveRecipientPhones(
       return {
         targets: [],
         error:
-          'Nenhum telefone no perfil (phone ou user_metadata.whatsapp). Configure antes de agendar.',
+          'Telefone não encontrado (recipient_phone vazio, profiles e auth sem número).',
       }
     }
     return { targets: [raw], error: null }
@@ -166,7 +196,7 @@ export async function checkAndSendScheduledMessages(
   const { data, error } = await supabase
     .from('scheduled_messages')
     .select(
-      'id, user_id, recipient_type, content_type, message_body, segment_lead_ids',
+      'id, user_id, recipient_type, content_type, message_body, segment_lead_ids, recipient_phone',
     )
     .eq('status', 'pending')
     .eq('is_active', true)
