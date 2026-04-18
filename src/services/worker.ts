@@ -1,4 +1,4 @@
-import type { SupabaseClient } from '@supabase/supabase-js'
+import { createClient, type SupabaseClient } from '@supabase/supabase-js'
 import type { EvolutionHttpConfig } from './evolution'
 import {
   sendAudioMessageWithConfig,
@@ -9,6 +9,38 @@ import {
 export type WorkerDeps = {
   supabase: SupabaseClient
   evolution: EvolutionHttpConfig
+}
+
+/**
+ * Lê `CHAVE_MESTRA_ZAPIFICA` do ambiente (Node/scripts). Mesmo segredo da Edge Function.
+ */
+function readChaveMestraZapificaFromEnv(): string {
+  const g = globalThis as unknown as {
+    process?: { env?: Record<string, string | undefined> }
+  }
+  return (g.process?.env?.CHAVE_MESTRA_ZAPIFICA ?? '').trim()
+}
+
+/**
+ * Cliente Supabase com bypass RLS, para rodar o worker fora da Edge (cron local, script).
+ * Exige `CHAVE_MESTRA_ZAPIFICA` no ambiente (normalmente a service role do projeto).
+ */
+export function createSupabaseComChaveMestraZapifica(
+  supabaseUrl: string,
+): SupabaseClient {
+  const key = readChaveMestraZapificaFromEnv()
+  if (!key) {
+    throw new Error(
+      'Defina CHAVE_MESTRA_ZAPIFICA no ambiente (mesmo valor configurado na Edge Function).',
+    )
+  }
+  return createClient(supabaseUrl.trim(), key, {
+    auth: {
+      persistSession: false,
+      autoRefreshToken: false,
+      detectSessionInUrl: false,
+    },
+  })
 }
 
 export type WorkerRunSummary = {
@@ -126,23 +158,32 @@ export async function checkAndSendScheduledMessages(
   const { supabase } = deps
   const nowUtcIso = new Date().toISOString()
   console.log(
-    '[worker] Agora UTC (scheduled_at <=):',
+    '[worker] Buscando mensagens pending com scheduled_at <=',
     nowUtcIso,
+    '| filtros: .eq("status","pending"), .eq("is_active", true boolean)',
   )
 
-  const { data: candidates, error: fetchErr } = await supabase
+  const { data, error } = await supabase
     .from('scheduled_messages')
     .select(
       'id, user_id, recipient_type, content_type, message_body, segment_lead_ids',
     )
-    .eq('is_active', true)
     .eq('status', 'pending')
+    .eq('is_active', true)
     .lte('scheduled_at', nowUtcIso)
     .order('scheduled_at', { ascending: true })
     .limit(BATCH_LIMIT)
 
-  if (fetchErr) {
-    console.error('[worker] Falha ao listar agendamentos:', fetchErr.message)
+  const candidates = data
+  console.log(
+    '[worker] Resultado da busca:',
+    candidates?.length ?? 0,
+    'linhas encontradas. Erro do banco:',
+    error,
+  )
+
+  if (error) {
+    console.error('[worker] Falha ao listar agendamentos:', error.message)
     return { processed: 0, skipped: 1 }
   }
 

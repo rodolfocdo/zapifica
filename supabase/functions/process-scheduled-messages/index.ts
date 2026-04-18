@@ -3,8 +3,8 @@
  * Agende no Supabase Dashboard → Edge Functions → Schedules (a cada 1 minuto).
  *
  * Variáveis de ambiente (segredos da função):
- * - SUPABASE_URL (preenchido automaticamente)
- * - SUPABASE_SERVICE_ROLE_KEY
+ * - SUPABASE_URL (URL do projeto)
+ * - CHAVE_MESTRA_ZAPIFICA (chave com bypass RLS — ex.: service role; configure no painel da função)
  * - EVOLUTION_URL (URL base da Evolution, sem barra final)
  * - EVOLUTION_API_KEY (header apikey)
  * - CRON_SECRET (opcional: envie header x-cron-secret igual ao valor)
@@ -342,26 +342,40 @@ async function checkAndSendScheduledMessages(
   supabase: SupabaseClient,
   evolution: EvolutionHttpConfig,
 ): Promise<WorkerRunSummary> {
-  // `toISOString()` é sempre UTC (sufixo Z); `scheduled_at` no banco é timestamptz.
   const nowUtcIso = new Date().toISOString()
   console.log(
-    '[worker] Agora UTC (comparação scheduled_at <=):',
+    '[worker] Buscando mensagens pending com scheduled_at <=',
     nowUtcIso,
+    '| filtros: status eq "pending" (minúsculo), is_active eq boolean true',
   )
 
-  const { data: candidates, error: fetchErr } = await supabase
+  const { data, error } = await supabase
     .from('scheduled_messages')
     .select(
       'id, user_id, recipient_type, content_type, message_body, segment_lead_ids',
     )
-    .eq('is_active', true)
     .eq('status', 'pending')
+    .eq('is_active', true)
     .lte('scheduled_at', nowUtcIso)
     .order('scheduled_at', { ascending: true })
     .limit(BATCH_LIMIT)
 
-  if (fetchErr) {
-    console.error('[worker] listar:', fetchErr.message)
+  const candidates = data
+  console.log(
+    '[worker] Resultado da busca:',
+    candidates?.length ?? 0,
+    'linhas encontradas. Erro do banco:',
+    error,
+  )
+  if (candidates?.length) {
+    console.log(
+      '[worker] IDs retornados:',
+      candidates.map((r: { id: string }) => r.id).join(', '),
+    )
+  }
+
+  if (error) {
+    console.error('[worker] Falha na query scheduled_messages:', error.message)
     return { processed: 0, skipped: 1 }
   }
 
@@ -495,8 +509,8 @@ Deno.serve(async (req) => {
     }
   }
 
-  const supabaseUrl = Deno.env.get('SUPABASE_URL')
-  const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')
+  const supabaseUrl = Deno.env.get('SUPABASE_URL')?.trim()
+  const chaveMestra = Deno.env.get('CHAVE_MESTRA_ZAPIFICA')?.trim() ?? ''
   const evoUrlRaw =
     Deno.env.get('EVOLUTION_URL') ?? Deno.env.get('VITE_EVOLUTION_URL') ?? ''
   const evoKey =
@@ -505,14 +519,22 @@ Deno.serve(async (req) => {
     Deno.env.get('VITE_EVOLUTION_GLOBAL_KEY') ??
     ''
 
-  if (!supabaseUrl || !serviceKey) {
+  if (!supabaseUrl || !chaveMestra) {
     return new Response(
       JSON.stringify({
-        erro: 'SUPABASE_URL ou SUPABASE_SERVICE_ROLE_KEY ausentes.',
+        erro:
+          'SUPABASE_URL ou CHAVE_MESTRA_ZAPIFICA ausentes. Crie o segredo CHAVE_MESTRA_ZAPIFICA na função (valor = service role do projeto).',
       }),
       { status: 500, headers: { 'Content-Type': 'application/json' } },
     )
   }
+
+  console.log(
+    '[worker] createClient com CHAVE_MESTRA_ZAPIFICA (comprimento após trim):',
+    chaveMestra.length,
+    '| URL:',
+    supabaseUrl,
+  )
 
   if (!evoUrlRaw.trim() || !evoKey.trim()) {
     return new Response(
@@ -529,8 +551,12 @@ Deno.serve(async (req) => {
     apiKey: evoKey.trim(),
   }
 
-  const supabase = createClient(supabaseUrl, serviceKey, {
-    auth: { persistSession: false, autoRefreshToken: false },
+  const supabase = createClient(supabaseUrl, chaveMestra, {
+    auth: {
+      persistSession: false,
+      autoRefreshToken: false,
+      detectSessionInUrl: false,
+    },
   })
 
   try {

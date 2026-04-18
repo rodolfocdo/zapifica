@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from 'react'
+import { useCallback, useEffect, useState, type FormEvent } from 'react'
 import {
   Calendar,
   Clock,
@@ -22,7 +22,8 @@ type NewEventModalProps = {
   /** Hora inicial sugerida (0–23) ao clicar na grade */
   initialHour: number
   maskedPersonalPhone: string
-  onSaved: () => void
+  /** Recarrega a agenda no pai; pode ser async para aguardar o fetch antes de fechar o modal. */
+  onSaved: () => void | Promise<void>
 }
 
 const CATEGORIAS: { value: string; label: string }[] = [
@@ -92,8 +93,7 @@ export function NewEventModal({
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  useEffect(() => {
-    if (!open) return
+  const reinicializarCamposDoModal = useCallback(() => {
     const base = new Date(initialDate)
     const start = new Date(base)
     start.setHours(initialHour, 0, 0, 0)
@@ -116,6 +116,11 @@ export function NewEventModal({
     setMessageBody('Olá! Lembrete da Zapifica…')
     setSegmentIds(new Set())
     setError(null)
+  }, [initialDate, initialHour])
+
+  useEffect(() => {
+    if (!open) return
+    reinicializarCamposDoModal()
 
     void (async () => {
       const { data } = await supabase
@@ -124,7 +129,7 @@ export function NewEventModal({
         .order('nome', { ascending: true })
       setLeads((data ?? []) as LeadOption[])
     })()
-  }, [open, initialDate, initialHour])
+  }, [open, initialDate, initialHour, reinicializarCamposDoModal])
 
   if (!open) return null
 
@@ -192,21 +197,19 @@ export function NewEventModal({
 
     setSubmitting(true)
 
+    const ownerId = user.id
     const startAtUtc = start.toISOString()
     const endAtUtc = end.toISOString()
     console.log(
-      '[Agenda] Salvando evento — start_at (UTC ISO):',
+      '[Agenda] Passo 1 — criar evento no calendário (RLS exige user_id =',
+      ownerId,
+      ') start_at/end_at UTC:',
       startAtUtc,
-      '| end_at (UTC ISO):',
       endAtUtc,
-      '| interpretação local:',
-      start.toString(),
-      '→',
-      end.toString(),
     )
 
-    const row = {
-      user_id: user.id,
+    const eventoRow = {
+      user_id: ownerId,
       title: t,
       category,
       client_id: clientId || null,
@@ -215,13 +218,13 @@ export function NewEventModal({
       sync_kanban: syncKanban,
     }
 
-    const { data: ev, error: evErr } = await supabase
+    const { data: eventoCriado, error: evErr } = await supabase
       .from('events')
-      .insert(row)
-      .select('id')
+      .insert(eventoRow)
+      .select('id, user_id')
       .single()
 
-    if (evErr || !ev) {
+    if (evErr || !eventoCriado) {
       setSubmitting(false)
       setError(
         evErr?.message?.includes('relation')
@@ -231,17 +234,34 @@ export function NewEventModal({
       return
     }
 
+    if (eventoCriado.user_id !== ownerId) {
+      console.warn(
+        '[Agenda] Atenção: user_id retornado difere do usuário logado.',
+        eventoCriado.user_id,
+        ownerId,
+      )
+    }
+
+    console.log(
+      '[Agenda] Evento gravado — id:',
+      eventoCriado.id,
+      '| user_id:',
+      eventoCriado.user_id,
+    )
+
     if (dispatchActive && dispatchAt) {
       const scheduledAtUtcIso = dispatchAt.toISOString()
       console.log(
-        '[Agenda] scheduled_at disparo (UTC ISO enviado ao Supabase):',
+        '[Agenda] Passo 2 — criar scheduled_messages ligado ao evento',
+        eventoCriado.id,
+        '| scheduled_at UTC:',
         scheduledAtUtcIso,
-        '| instante local do usuário:',
-        dispatchAt.toString(),
+        '| is_active: true | user_id:',
+        ownerId,
       )
       const { error: smErr } = await supabase.from('scheduled_messages').insert({
-        event_id: ev.id,
-        user_id: user.id,
+        event_id: eventoCriado.id,
+        user_id: ownerId,
         is_active: true,
         recipient_type: recipientType,
         content_type: contentType,
@@ -252,7 +272,7 @@ export function NewEventModal({
           recipientType === 'segment' ? [...segmentIds] : [],
       })
       if (smErr) {
-        await supabase.from('events').delete().eq('id', ev.id)
+        await supabase.from('events').delete().eq('id', eventoCriado.id)
         setSubmitting(false)
         setError(smErr.message ?? 'Erro ao salvar o disparo agendado.')
         return
@@ -260,7 +280,8 @@ export function NewEventModal({
     }
 
     setSubmitting(false)
-    onSaved()
+    await Promise.resolve(onSaved())
+    reinicializarCamposDoModal()
     onClose()
   }
 

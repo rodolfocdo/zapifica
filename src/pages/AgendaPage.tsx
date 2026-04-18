@@ -754,7 +754,9 @@ export function AgendaPage() {
         initialDate={modalSeed.date}
         initialHour={modalSeed.hour}
         maskedPersonalPhone={maskPersonalPhone(user)}
-        onSaved={() => void fetchEvents()}
+        onSaved={async () => {
+          await fetchEvents()
+        }}
       />
     </div>
   )
