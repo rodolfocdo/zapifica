@@ -245,12 +245,19 @@ export function NewEventModal({
         .select('id, user_id')
         .single()
 
-      if (evErr || !eventoCriado) {
+      if (evErr) {
         const det = textoErroParaUsuario(evErr)
         setError(
           det.includes('relation') || det.includes('does not exist')
             ? 'Tabelas da agenda ainda não criadas. Execute a migração no Supabase.'
             : `Passo 1 (events): ${det}`,
+        )
+        return
+      }
+
+      if (!eventoCriado?.id) {
+        setError(
+          'Passo 1 (events): insert pareceu ok, mas nenhuma linha foi retornada no select. Verifique políticas RLS de SELECT em `events`.',
         )
         return
       }
@@ -317,14 +324,16 @@ export function NewEventModal({
         scheduledAtUtcIso,
       )
 
-      const { error: smErr } = await supabase
+      // `.select()` obrigatório no v2: sem ele, sucesso vem como `{ data: null, error: null }`
+      const { error: erroMsg } = await supabase
         .from('scheduled_messages')
         .insert(mensagemAgendadaRow)
+        .select('id')
 
-      if (smErr) {
+      if (erroMsg) {
         await supabase.from('events').delete().eq('id', eventoCriado.id)
         setError(
-          `Passo 2 (scheduled_messages): ${textoErroParaUsuario(smErr)}`,
+          `Passo 2 (scheduled_messages): ${textoErroParaUsuario(erroMsg)}`,
         )
         return
       }
