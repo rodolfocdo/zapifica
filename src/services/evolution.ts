@@ -1,43 +1,94 @@
 /**
- * Cliente HTTP para Evolution API (instância + QR Code).
- * Variáveis: VITE_EVOLUTION_URL (sem barra final) e VITE_EVOLUTION_GLOBAL_KEY (header `apikey`).
+ * Cliente HTTP para Evolution API (instância + QR Code + envio).
+ * Variáveis no browser: VITE_EVOLUTION_URL e VITE_EVOLUTION_GLOBAL_KEY.
+ * No servidor (worker/Edge): passe `EvolutionHttpConfig` explicitamente.
  */
 
 export type CreateInstanceQrResult = {
-  /** Pronto para `src` de `<img />` (data URL PNG). */
   dataUrl: string | null
   error: string | null
-  /** Nome da instância usado na Evolution (derivado do user_id). */
   instanceName?: string
 }
 
 export type ConnectionStatusResult = {
   connected: boolean
-  /** Estado bruto retornado pela API (`open`, `close`, `connecting`…). */
   state: string | null
-  /** Número / identificador amigável, se a API enviar. */
   phone: string | null
-  /** Erro de rede ou HTTP; `null` em checagens silenciosas sem credenciais. */
   error: string | null
 }
 
-export type SendTextMessageResult = {
+export type EvolutionHttpConfig = {
+  baseUrl: string
+  apiKey: string
+}
+
+export type SendEvolutionResult = {
   ok: boolean
   error: string | null
+  /** `key.id` na resposta da Evolution, quando disponível */
+  messageId: string | null
 }
 
-function evolutionBaseUrl(): string {
-  const raw = import.meta.env.VITE_EVOLUTION_URL?.trim() ?? ''
+function trimBaseUrl(raw: string): string {
   return raw.replace(/\/+$/, '')
 }
 
-function evolutionApiKey(): string {
-  return import.meta.env.VITE_EVOLUTION_GLOBAL_KEY?.trim() ?? ''
+function evolutionConfigFromVite(): EvolutionHttpConfig | null {
+  const baseUrl = trimBaseUrl(import.meta.env.VITE_EVOLUTION_URL?.trim() ?? '')
+  const apiKey = import.meta.env.VITE_EVOLUTION_GLOBAL_KEY?.trim() ?? ''
+  if (!baseUrl || !apiKey) return null
+  return { baseUrl, apiKey }
+}
+
+function resolveConfig(
+  explicit?: EvolutionHttpConfig | null,
+): EvolutionHttpConfig | null {
+  if (explicit?.baseUrl && explicit?.apiKey) {
+    return { baseUrl: trimBaseUrl(explicit.baseUrl), apiKey: explicit.apiKey }
+  }
+  return evolutionConfigFromVite()
 }
 
 export function instanceNameFromUserId(userId: string): string {
   const safe = userId.replace(/[^a-zA-Z0-9-]/g, '_')
   return `zapifica_${safe}`.slice(0, 80)
+}
+
+/**
+ * Normaliza destino para Evolution: número (apenas dígitos) ou JID de grupo (@g.us).
+ * - Já contém `@g.us` → envia o identificador como veio (grupo).
+ * - JID `...@s.whatsapp.net` → extrai a parte numérica antes do `@`.
+ * - Começa com dígito (após trim) e não é grupo → só dígitos (DDI + número).
+ */
+export function normalizeEvolutionRecipient(
+  raw: string,
+): { recipient: string } | { error: string } {
+  const t = raw.trim()
+  if (!t) {
+    return { error: 'Destinatário vazio.' }
+  }
+  if (t.includes('@g.us')) {
+    return { recipient: t }
+  }
+  if (t.includes('@s.whatsapp.net')) {
+    const before = t.split('@')[0] ?? ''
+    const digits = before.replace(/\D/g, '')
+    if (digits.length < 10) {
+      return { error: 'JID individual inválido.' }
+    }
+    return { recipient: digits }
+  }
+  if (t.includes('@') && !/^\d/.test(t)) {
+    return { recipient: t }
+  }
+  const digits = t.replace(/\D/g, '')
+  if (!digits || digits.length < 10) {
+    return {
+      error:
+        'Informe um número válido com DDD e código do país (ex.: 5548999999999) ou um ID de grupo (@g.us).',
+    }
+  }
+  return { recipient: digits }
 }
 
 function formatPhoneFromApi(raw: string): string {
@@ -70,16 +121,115 @@ function pickPhoneFromPayload(data: unknown): string | null {
   return null
 }
 
-/**
- * Consulta o estado da instância WhatsApp na Evolution (`GET /instance/connectionState/{instance}`).
- */
+function formatHttpError(status: number, body: unknown): string {
+  if (body && typeof body === 'object') {
+    const b = body as Record<string, unknown>
+    const msg = b.message
+    if (Array.isArray(msg) && msg.length) {
+      return String(msg[0])
+    }
+    if (typeof b.error === 'string') return b.error
+    const resp = b.response as Record<string, unknown> | undefined
+    if (resp && Array.isArray(resp.message) && resp.message.length) {
+      return String(resp.message[0])
+    }
+  }
+  return `Erro HTTP ${status} na Evolution API.`
+}
+
+export function extractEvolutionMessageId(data: unknown): string | null {
+  if (!data || typeof data !== 'object') return null
+  const o = data as Record<string, unknown>
+  const key = o.key
+  if (key && typeof key === 'object') {
+    const id = (key as Record<string, unknown>).id
+    if (typeof id === 'string' && id.length > 0) return id
+  }
+  return null
+}
+
+async function evolutionFetch(
+  cfg: EvolutionHttpConfig,
+  path: string,
+  init: RequestInit & { parseJson?: boolean } = {},
+): Promise<{ ok: boolean; status: number; data: unknown }> {
+  const url = `${cfg.baseUrl}${path.startsWith('/') ? path : `/${path}`}`
+
+  const { parseJson = true, ...rest } = init
+  const res = await fetch(url, {
+    ...rest,
+    headers: {
+      apikey: cfg.apiKey,
+      Accept: 'application/json',
+      ...(rest.headers as Record<string, string>),
+    },
+  })
+
+  let data: unknown = null
+  if (parseJson) {
+    const text = await res.text()
+    if (text) {
+      try {
+        data = JSON.parse(text) as unknown
+      } catch {
+        data = { raw: text }
+      }
+    }
+  }
+
+  return { ok: res.ok, status: res.status, data }
+}
+
+function normalizeQrDataUrl(value: string): string {
+  const t = value.trim()
+  if (t.startsWith('data:image')) return t
+  return `data:image/png;base64,${t}`
+}
+
+function extractQrFromPayload(payload: unknown): string | null {
+  if (!payload || typeof payload !== 'object') return null
+  const o = payload as Record<string, unknown>
+
+  const direct =
+    typeof o.base64 === 'string'
+      ? o.base64
+      : typeof o.code === 'string'
+        ? o.code
+        : null
+
+  if (direct && direct.length > 80) {
+    return normalizeQrDataUrl(direct)
+  }
+
+  const qr = o.qrcode
+  if (qr && typeof qr === 'object') {
+    const q = qr as Record<string, unknown>
+    const b =
+      typeof q.base64 === 'string'
+        ? q.base64
+        : typeof q.code === 'string'
+          ? q.code
+          : null
+    if (b && b.length > 80) return normalizeQrDataUrl(b)
+  }
+
+  if (typeof qr === 'string' && qr.length > 80) {
+    return normalizeQrDataUrl(qr)
+  }
+
+  const inst = o.instance
+  if (inst && typeof inst === 'object') {
+    return extractQrFromPayload(inst)
+  }
+
+  return null
+}
+
 export async function checkConnectionStatus(
   userId: string,
 ): Promise<ConnectionStatusResult> {
-  const base = evolutionBaseUrl()
-  const key = evolutionApiKey()
-
-  if (!base || !key) {
+  const cfg = resolveConfig()
+  if (!cfg) {
     return {
       connected: false,
       state: null,
@@ -92,6 +242,7 @@ export async function checkConnectionStatus(
 
   try {
     const res = await evolutionFetch(
+      cfg,
       `/instance/connectionState/${encodeURIComponent(instanceName)}`,
       { method: 'GET' },
     )
@@ -144,106 +295,51 @@ export async function checkConnectionStatus(
   }
 }
 
-function normalizeQrDataUrl(value: string): string {
-  const t = value.trim()
-  if (t.startsWith('data:image')) return t
-  return `data:image/png;base64,${t}`
-}
-
-function extractQrFromPayload(payload: unknown): string | null {
-  if (!payload || typeof payload !== 'object') return null
-  const o = payload as Record<string, unknown>
-
-  const direct =
-    typeof o.base64 === 'string' ? o.base64 : typeof o.code === 'string' ? o.code : null
-
-  if (direct && direct.length > 80) {
-    return normalizeQrDataUrl(direct)
-  }
-
-  const qr = o.qrcode
-  if (qr && typeof qr === 'object') {
-    const q = qr as Record<string, unknown>
-    const b = typeof q.base64 === 'string' ? q.base64 : typeof q.code === 'string' ? q.code : null
-    if (b && b.length > 80) return normalizeQrDataUrl(b)
-  }
-
-  if (typeof qr === 'string' && qr.length > 80) {
-    return normalizeQrDataUrl(qr)
-  }
-
-  const inst = o.instance
-  if (inst && typeof inst === 'object') {
-    return extractQrFromPayload(inst)
-  }
-
-  return null
-}
-
-function formatHttpError(status: number, body: unknown): string {
-  if (body && typeof body === 'object') {
-    const b = body as Record<string, unknown>
-    const msg = b.message
-    if (Array.isArray(msg) && msg.length) {
-      return String(msg[0])
-    }
-    if (typeof b.error === 'string') return b.error
-    const resp = b.response as Record<string, unknown> | undefined
-    if (resp && Array.isArray(resp.message) && resp.message.length) {
-      return String(resp.message[0])
-    }
-  }
-  return `Erro HTTP ${status} na Evolution API.`
-}
-
-/**
- * Envia mensagem de texto pela instância Evolution (`POST /message/sendText/{instance}`).
- * O nome da instância segue `instanceNameFromUserId` (ex.: `zapifica_{userId}`).
- * Corpo: `{ number, text }` (número só dígitos, com código do país; sem `+`).
- */
 export async function sendTextMessage(
   userId: string,
   number: string,
   text: string,
-): Promise<SendTextMessageResult> {
-  const base = evolutionBaseUrl()
-  const key = evolutionApiKey()
+  httpConfig?: EvolutionHttpConfig | null,
+): Promise<SendEvolutionResult> {
+  return sendTextMessageWithConfig(userId, number, text, resolveConfig(httpConfig))
+}
 
-  if (!base || !key) {
+export async function sendTextMessageWithConfig(
+  userId: string,
+  number: string,
+  text: string,
+  cfg: EvolutionHttpConfig | null,
+): Promise<SendEvolutionResult> {
+  if (!cfg) {
     return {
       ok: false,
       error:
-        'Configure VITE_EVOLUTION_URL e VITE_EVOLUTION_GLOBAL_KEY no arquivo .env.local.',
+        'Configure VITE_EVOLUTION_URL e VITE_EVOLUTION_GLOBAL_KEY (ou credenciais no worker).',
+      messageId: null,
     }
   }
 
-  const digits = number.replace(/\D/g, '')
+  const normalized = normalizeEvolutionRecipient(number)
+  if ('error' in normalized) {
+    return { ok: false, error: normalized.error, messageId: null }
+  }
+
   const trimmedText = text.trim()
-
-  if (!digits || digits.length < 10) {
-    return {
-      ok: false,
-      error: 'Informe um número válido com DDD e código do país (ex.: 5548999999999).',
-    }
-  }
-
   if (!trimmedText) {
-    return {
-      ok: false,
-      error: 'Digite a mensagem a ser enviada.',
-    }
+    return { ok: false, error: 'Digite a mensagem a ser enviada.', messageId: null }
   }
 
   const instanceName = instanceNameFromUserId(userId)
 
   try {
     const res = await evolutionFetch(
+      cfg,
       `/message/sendText/${encodeURIComponent(instanceName)}`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          number: digits,
+          number: normalized.recipient,
           text: trimmedText,
         }),
       },
@@ -253,70 +349,178 @@ export async function sendTextMessage(
       return {
         ok: false,
         error: formatHttpError(res.status, res.data),
+        messageId: null,
       }
     }
 
-    return { ok: true, error: null }
+    return {
+      ok: true,
+      error: null,
+      messageId: extractEvolutionMessageId(res.data),
+    }
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
     if (msg === 'Failed to fetch') {
       return {
         ok: false,
         error:
-          'Não foi possível contatar a Evolution API (rede ou CORS). Verifique VITE_EVOLUTION_URL.',
+          'Não foi possível contatar a Evolution API (rede ou CORS). Verifique a URL.',
+        messageId: null,
       }
     }
     return {
       ok: false,
       error: msg || 'Erro inesperado ao enviar a mensagem.',
+      messageId: null,
     }
   }
-}
-
-async function evolutionFetch(
-  path: string,
-  init: RequestInit & { parseJson?: boolean } = {},
-): Promise<{ ok: boolean; status: number; data: unknown }> {
-  const base = evolutionBaseUrl()
-  const key = evolutionApiKey()
-  const url = `${base}${path.startsWith('/') ? path : `/${path}`}`
-
-  const { parseJson = true, ...rest } = init
-  const res = await fetch(url, {
-    ...rest,
-    headers: {
-      apikey: key,
-      Accept: 'application/json',
-      ...(rest.headers as Record<string, string>),
-    },
-  })
-
-  let data: unknown = null
-  if (parseJson) {
-    const text = await res.text()
-    if (text) {
-      try {
-        data = JSON.parse(text) as unknown
-      } catch {
-        data = { raw: text }
-      }
-    }
-  }
-
-  return { ok: res.ok, status: res.status, data }
 }
 
 /**
- * Cria (ou reutiliza) uma instância WhatsApp na Evolution com nome derivado do `user_id`
- * do Supabase e obtém o QR Code em base64 (via resposta do create e/ou GET connect).
+ * Áudio (URL ou base64) — endpoint de voz/nota da Evolution.
  */
+export async function sendAudioMessageWithConfig(
+  userId: string,
+  recipient: string,
+  audio: string,
+  cfg: EvolutionHttpConfig | null,
+): Promise<SendEvolutionResult> {
+  if (!cfg) {
+    return {
+      ok: false,
+      error: 'Credenciais da Evolution não configuradas.',
+      messageId: null,
+    }
+  }
+  const normalized = normalizeEvolutionRecipient(recipient)
+  if ('error' in normalized) {
+    return { ok: false, error: normalized.error, messageId: null }
+  }
+  const trimmed = audio.trim()
+  if (!trimmed) {
+    return { ok: false, error: 'Informe a URL ou o base64 do áudio.', messageId: null }
+  }
+
+  const instanceName = instanceNameFromUserId(userId)
+
+  try {
+    const res = await evolutionFetch(
+      cfg,
+      `/message/sendWhatsAppAudio/${encodeURIComponent(instanceName)}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          number: normalized.recipient,
+          audio: trimmed,
+        }),
+      },
+    )
+
+    if (!res.ok) {
+      return {
+        ok: false,
+        error: formatHttpError(res.status, res.data),
+        messageId: null,
+      }
+    }
+
+    return {
+      ok: true,
+      error: null,
+      messageId: extractEvolutionMessageId(res.data),
+    }
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    return {
+      ok: false,
+      error: msg || 'Erro ao enviar áudio.',
+      messageId: null,
+    }
+  }
+}
+
+/**
+ * Imagem (ou mídia) — URL ou base64.
+ */
+export async function sendImageMessageWithConfig(
+  userId: string,
+  recipient: string,
+  media: string,
+  caption: string,
+  cfg: EvolutionHttpConfig | null,
+): Promise<SendEvolutionResult> {
+  if (!cfg) {
+    return {
+      ok: false,
+      error: 'Credenciais da Evolution não configuradas.',
+      messageId: null,
+    }
+  }
+  const normalized = normalizeEvolutionRecipient(recipient)
+  if ('error' in normalized) {
+    return { ok: false, error: normalized.error, messageId: null }
+  }
+  const trimmed = media.trim()
+  if (!trimmed) {
+    return { ok: false, error: 'Informe a URL ou o base64 da imagem.', messageId: null }
+  }
+
+  const instanceName = instanceNameFromUserId(userId)
+  const captionTrim = caption.trim()
+  const isData = trimmed.startsWith('data:')
+  const mimetype = isData
+    ? trimmed.split(';')[0]?.replace('data:', '') || 'image/png'
+    : 'image/jpeg'
+  const fileName =
+    mimetype.includes('png') ? 'imagem.png' : mimetype.includes('webp') ? 'imagem.webp' : 'imagem.jpg'
+
+  try {
+    const res = await evolutionFetch(
+      cfg,
+      `/message/sendMedia/${encodeURIComponent(instanceName)}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          number: normalized.recipient,
+          mediatype: 'image',
+          mimetype,
+          caption: captionTrim || ' ',
+          media: trimmed,
+          fileName,
+        }),
+      },
+    )
+
+    if (!res.ok) {
+      return {
+        ok: false,
+        error: formatHttpError(res.status, res.data),
+        messageId: null,
+      }
+    }
+
+    return {
+      ok: true,
+      error: null,
+      messageId: extractEvolutionMessageId(res.data),
+    }
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    return {
+      ok: false,
+      error: msg || 'Erro ao enviar imagem.',
+      messageId: null,
+    }
+  }
+}
+
 export async function createInstanceAndGetQr(
   userId: string,
 ): Promise<CreateInstanceQrResult> {
-  const base = evolutionBaseUrl()
-  const key = evolutionApiKey()
-
-  if (!base || !key) {
+  const cfg = resolveConfig()
+  if (!cfg) {
     return {
       dataUrl: null,
       error:
@@ -329,6 +533,7 @@ export async function createInstanceAndGetQr(
   try {
     const tryConnect = async (): Promise<string | null> => {
       const connect = await evolutionFetch(
+        cfg,
         `/instance/connect/${encodeURIComponent(instanceName)}`,
         { method: 'GET' },
       )
@@ -338,7 +543,7 @@ export async function createInstanceAndGetQr(
       return extractQrFromPayload(connect.data)
     }
 
-    const create = await evolutionFetch('/instance/create', {
+    const create = await evolutionFetch(cfg, '/instance/create', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({

@@ -1,0 +1,5 @@
+# https://supabase.com/docs/guides/cli/config
+project_id = "zapifica"
+
+[functions.process-scheduled-messages]
+verify_jwt = false

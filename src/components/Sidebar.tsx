@@ -1,4 +1,5 @@
 import {
+  CalendarDays,
   Home,
   LogOut,
   Mic2,
@@ -8,7 +9,12 @@ import {
 import logoZapifica from '../assets/logo-zapifica.png'
 import { supabase } from '../lib/supabase'
 
-export type DashboardNavId = 'home' | 'crm' | 'zap-voice' | 'settings'
+export type DashboardNavId =
+  | 'home'
+  | 'crm'
+  | 'agenda'
+  | 'zap-voice'
+  | 'settings'
 
 type NavItem = {
   id: DashboardNavId
@@ -19,6 +25,7 @@ type NavItem = {
 const items: NavItem[] = [
   { id: 'home', label: 'Início', icon: Home },
   { id: 'crm', label: 'CRM / Funil', icon: SquareKanban },
+  { id: 'agenda', label: 'Agenda Suprema', icon: CalendarDays },
   { id: 'zap-voice', label: 'Zap Voice', icon: Mic2 },
   { id: 'settings', label: 'Configurações', icon: Settings2 },
 ]
