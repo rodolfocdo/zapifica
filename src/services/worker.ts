@@ -124,7 +124,11 @@ export async function checkAndSendScheduledMessages(
   deps: WorkerDeps,
 ): Promise<WorkerRunSummary> {
   const { supabase } = deps
-  const nowIso = new Date().toISOString()
+  const nowUtcIso = new Date().toISOString()
+  console.log(
+    '[worker] Agora UTC (scheduled_at <=):',
+    nowUtcIso,
+  )
 
   const { data: candidates, error: fetchErr } = await supabase
     .from('scheduled_messages')
@@ -133,7 +137,7 @@ export async function checkAndSendScheduledMessages(
     )
     .eq('is_active', true)
     .eq('status', 'pending')
-    .lte('scheduled_at', nowIso)
+    .lte('scheduled_at', nowUtcIso)
     .order('scheduled_at', { ascending: true })
     .limit(BATCH_LIMIT)
 

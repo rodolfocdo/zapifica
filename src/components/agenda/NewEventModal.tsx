@@ -12,16 +12,6 @@ import {
 } from 'lucide-react'
 import { supabase } from '../../lib/supabase'
 
-export type AgendaCalendarEvent = {
-  id: string
-  title: string
-  category: string
-  client_id: string | null
-  start_at: string
-  end_at: string
-  sync_kanban: boolean
-}
-
 type LeadOption = { id: string; nome: string; telefone: string }
 
 type NewEventModalProps = {
@@ -55,39 +45,15 @@ function toTimeInputValue(d: Date) {
   return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`
 }
 
+/** Interpreta data/hora no fuso local do navegador (componentes nativos). */
 function parseLocalDateTime(dateStr: string, timeStr: string): Date | null {
   const [y, m, day] = dateStr.split('-').map(Number)
-  const [hh, mm] = timeStr.split(':').map(Number)
+  const parts = timeStr.split(':').map(Number)
+  const hh = parts[0]
+  const mm = parts[1] ?? 0
+  const ss = parts[2] ?? 0
   if (!y || !m || !day || Number.isNaN(hh) || Number.isNaN(mm)) return null
-  return new Date(y, m - 1, day, hh, mm, 0, 0)
-}
-
-function formatDispatchDisplay(d: Date) {
-  return d.toLocaleString('pt-BR', {
-    day: '2-digit',
-    month: '2-digit',
-    year: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-  })
-}
-
-function parseDispatchDisplay(s: string): Date | null {
-  const t = s.trim()
-  const m = t.match(
-    /^(\d{2})\/(\d{2})\/(\d{4})\s+(\d{2}):(\d{2})$/,
-  )
-  if (!m) return null
-  const [, dd, mo, yy, hh, mm] = m
-  return new Date(
-    Number(yy),
-    Number(mo) - 1,
-    Number(dd),
-    Number(hh),
-    Number(mm),
-    0,
-    0,
-  )
+  return new Date(y, m - 1, day, hh, mm, ss, 0)
 }
 
 export function NewEventModal({
@@ -117,7 +83,8 @@ export function NewEventModal({
   const [messageBody, setMessageBody] = useState(
     'Olá! Lembrete da Zapifica…',
   )
-  const [dispatchAtDisplay, setDispatchAtDisplay] = useState('')
+  const [dispatchDate, setDispatchDate] = useState('')
+  const [dispatchTime, setDispatchTime] = useState('09:00')
 
   const [leads, setLeads] = useState<LeadOption[]>([])
   const [segmentIds, setSegmentIds] = useState<Set<string>>(new Set())
@@ -137,7 +104,8 @@ export function NewEventModal({
     setStartTime(toTimeInputValue(start))
     setEndDate(toDateInputValue(end))
     setEndTime(toTimeInputValue(end))
-    setDispatchAtDisplay(formatDispatchDisplay(start))
+    setDispatchDate(toDateInputValue(start))
+    setDispatchTime(toTimeInputValue(start))
     setTitle('')
     setCategory('reuniao')
     setClientId('')
@@ -195,11 +163,9 @@ export function NewEventModal({
 
     let dispatchAt: Date | null = null
     if (dispatchActive) {
-      dispatchAt = parseDispatchDisplay(dispatchAtDisplay)
+      dispatchAt = parseLocalDateTime(dispatchDate, dispatchTime)
       if (!dispatchAt) {
-        setError(
-          'Use o horário exato do disparo no formato DD/MM/AAAA HH:mm.',
-        )
+        setError('Preencha a data e o horário do disparo.')
         return
       }
       if (!messageBody.trim() && contentType === 'text') {
@@ -226,13 +192,26 @@ export function NewEventModal({
 
     setSubmitting(true)
 
+    const startAtUtc = start.toISOString()
+    const endAtUtc = end.toISOString()
+    console.log(
+      '[Agenda] Salvando evento — start_at (UTC ISO):',
+      startAtUtc,
+      '| end_at (UTC ISO):',
+      endAtUtc,
+      '| interpretação local:',
+      start.toString(),
+      '→',
+      end.toString(),
+    )
+
     const row = {
       user_id: user.id,
       title: t,
       category,
       client_id: clientId || null,
-      start_at: start.toISOString(),
-      end_at: end.toISOString(),
+      start_at: startAtUtc,
+      end_at: endAtUtc,
       sync_kanban: syncKanban,
     }
 
@@ -253,6 +232,13 @@ export function NewEventModal({
     }
 
     if (dispatchActive && dispatchAt) {
+      const scheduledAtUtcIso = dispatchAt.toISOString()
+      console.log(
+        '[Agenda] scheduled_at disparo (UTC ISO enviado ao Supabase):',
+        scheduledAtUtcIso,
+        '| instante local do usuário:',
+        dispatchAt.toString(),
+      )
       const { error: smErr } = await supabase.from('scheduled_messages').insert({
         event_id: ev.id,
         user_id: user.id,
@@ -260,7 +246,7 @@ export function NewEventModal({
         recipient_type: recipientType,
         content_type: contentType,
         message_body: messageBody.trim() || null,
-        scheduled_at: dispatchAt.toISOString(),
+        scheduled_at: scheduledAtUtcIso,
         status: 'pending',
         segment_lead_ids:
           recipientType === 'segment' ? [...segmentIds] : [],
@@ -654,26 +640,52 @@ export function NewEventModal({
                   </div>
 
                   <div>
-                    <label
-                      htmlFor="evt-dispatch"
-                      className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-emerald-800"
-                    >
-                      Horário exato do disparo
-                    </label>
-                    <div className="relative">
-                      <input
-                        id="evt-dispatch"
-                        type="text"
-                        value={dispatchAtDisplay}
-                        onChange={(e) => setDispatchAtDisplay(e.target.value)}
-                        disabled={submitting}
-                        placeholder="18/04/2026 07:00"
-                        className="h-12 w-full rounded-xl border border-zinc-200 bg-zinc-50 px-4 pr-10 text-sm text-zinc-900 outline-none transition focus:border-brand-500 focus:bg-white focus:ring-4 focus:ring-brand-600/15 disabled:opacity-60"
-                      />
-                      <Calendar className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-400" />
+                    <p className="mb-2 text-xs font-bold uppercase tracking-wide text-emerald-800">
+                      Momento do disparo
+                    </p>
+                    <div className="grid gap-4 sm:grid-cols-2">
+                      <div>
+                        <label
+                          htmlFor="evt-dispatch-date"
+                          className="mb-1.5 block text-sm font-semibold text-zinc-700"
+                        >
+                          Data do disparo
+                        </label>
+                        <div className="relative">
+                          <Calendar className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-400" />
+                          <input
+                            id="evt-dispatch-date"
+                            type="date"
+                            value={dispatchDate}
+                            onChange={(e) => setDispatchDate(e.target.value)}
+                            disabled={submitting}
+                            className="h-12 w-full rounded-xl border border-zinc-200 bg-zinc-50 pl-10 pr-3 text-sm text-zinc-900 outline-none transition focus:border-brand-500 focus:bg-white focus:ring-4 focus:ring-brand-600/15 disabled:opacity-60"
+                          />
+                        </div>
+                      </div>
+                      <div>
+                        <label
+                          htmlFor="evt-dispatch-time"
+                          className="mb-1.5 block text-sm font-semibold text-zinc-700"
+                        >
+                          Horário do disparo
+                        </label>
+                        <div className="relative">
+                          <Clock className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-400" />
+                          <input
+                            id="evt-dispatch-time"
+                            type="time"
+                            value={dispatchTime}
+                            onChange={(e) => setDispatchTime(e.target.value)}
+                            disabled={submitting}
+                            className="h-12 w-full rounded-xl border border-zinc-200 bg-zinc-50 pl-10 pr-3 text-sm text-zinc-900 outline-none transition focus:border-brand-500 focus:bg-white focus:ring-4 focus:ring-brand-600/15 disabled:opacity-60"
+                          />
+                        </div>
+                      </div>
                     </div>
-                    <p className="mt-1 text-xs text-zinc-500">
-                      Formato: DD/MM/AAAA HH:mm (horário do robô Evolution).
+                    <p className="mt-2 text-xs leading-relaxed text-zinc-500">
+                      Data e hora no seu fuso local; o Zapifica grava em UTC no
+                      Supabase para bater com o worker (Evolution API).
                     </p>
                   </div>
                 </div>

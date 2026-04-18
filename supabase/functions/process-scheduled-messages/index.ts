@@ -342,7 +342,12 @@ async function checkAndSendScheduledMessages(
   supabase: SupabaseClient,
   evolution: EvolutionHttpConfig,
 ): Promise<WorkerRunSummary> {
-  const nowIso = new Date().toISOString()
+  // `toISOString()` é sempre UTC (sufixo Z); `scheduled_at` no banco é timestamptz.
+  const nowUtcIso = new Date().toISOString()
+  console.log(
+    '[worker] Agora UTC (comparação scheduled_at <=):',
+    nowUtcIso,
+  )
 
   const { data: candidates, error: fetchErr } = await supabase
     .from('scheduled_messages')
@@ -351,7 +356,7 @@ async function checkAndSendScheduledMessages(
     )
     .eq('is_active', true)
     .eq('status', 'pending')
-    .lte('scheduled_at', nowIso)
+    .lte('scheduled_at', nowUtcIso)
     .order('scheduled_at', { ascending: true })
     .limit(BATCH_LIMIT)
 
