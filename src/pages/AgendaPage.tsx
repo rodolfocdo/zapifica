@@ -14,6 +14,7 @@ type CalendarView = 'day' | 'week' | 'month'
 
 type ScheduledMessageRow = {
   status: string
+  is_active?: boolean | null
   scheduled_at: string | null
   last_error: string | null
   evolution_message_id: string | null
@@ -36,6 +37,17 @@ function pickScheduledMessage(
   const sm = ev.scheduled_messages
   if (!sm) return null
   if (Array.isArray(sm)) return sm[0] ?? null
+  return sm
+}
+
+/** Só exibe UI de WhatsApp quando há disparo ativo (não é o “stub” sem lembrete). */
+function pickDisparoWhatsappAtivo(
+  ev: AgendaEvent,
+): ScheduledMessageRow | null {
+  const sm = pickScheduledMessage(ev)
+  if (!sm) return null
+  if (sm.is_active === false) return null
+  if (sm.status === 'cancelled') return null
   return sm
 }
 
@@ -213,7 +225,7 @@ export function AgendaPage() {
       .from('events')
       .select(
         `id, title, category, client_id, start_at, end_at, sync_kanban,
-         scheduled_messages ( status, scheduled_at, last_error, evolution_message_id )`,
+         scheduled_messages ( status, is_active, scheduled_at, last_error, evolution_message_id )`,
       )
       .lte('start_at', re)
       .gte('end_at', rs)
@@ -379,7 +391,7 @@ export function AgendaPage() {
           ) : (
             <ul className="mt-4 divide-y divide-zinc-100">
               {historico.map((e) => {
-                const sm = pickScheduledMessage(e)
+                const sm = pickDisparoWhatsappAtivo(e)
                 return (
                   <li
                     key={e.id}
@@ -526,7 +538,7 @@ export function AgendaPage() {
                       </span>
                       <div className="mt-1 flex flex-1 flex-col gap-0.5 overflow-hidden">
                         {dayEvents.slice(0, 3).map((ev) => {
-                          const sm = pickScheduledMessage(ev)
+                          const sm = pickDisparoWhatsappAtivo(ev)
                           return (
                             <span
                               key={ev.id}
@@ -625,7 +637,7 @@ export function AgendaPage() {
                         </button>
                       ))}
                       {eventBlocksForDay(events, day).map(({ ev, top, height }) => {
-                        const sm = pickScheduledMessage(ev)
+                        const sm = pickDisparoWhatsappAtivo(ev)
                         return (
                           <div
                             key={ev.id}
@@ -699,7 +711,7 @@ export function AgendaPage() {
                   ))}
                   {eventBlocksForDay(events, cursor).map(
                     ({ ev, top, height }) => {
-                      const sm = pickScheduledMessage(ev)
+                      const sm = pickDisparoWhatsappAtivo(ev)
                       return (
                         <div
                           key={ev.id}

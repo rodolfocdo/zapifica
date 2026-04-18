@@ -382,113 +382,135 @@ async function checkAndSendScheduledMessages(
   let processed = 0
   let skipped = 0
 
-  for (const raw of candidates ?? []) {
-    const row = raw as ScheduledRow
-
-    const { data: claimed, error: claimErr } = await supabase
+  async function marcarErroNaLinha(
+    id: string,
+    motivo: string,
+  ): Promise<void> {
+    const texto = motivo.slice(0, 4000)
+    const { error: upErr } = await supabase
       .from('scheduled_messages')
       .update({
-        status: 'processing',
+        status: 'error',
+        last_error: texto,
         updated_at: new Date().toISOString(),
       })
-      .eq('id', row.id)
-      .eq('status', 'pending')
-      .select('id')
-      .maybeSingle()
-
-    if (claimErr || !claimed) {
-      skipped += 1
-      continue
-    }
-
-    try {
-      const { targets, error: resolveErr } = await resolveRecipientPhones(
-        supabase,
-        row,
+      .eq('id', id)
+      .in('status', ['pending', 'processing'])
+    if (upErr) {
+      console.error(
+        '[worker] Não foi possível gravar status=error em',
+        id,
+        upErr.message,
       )
-      if (resolveErr || targets.length === 0) {
-        await supabase
-          .from('scheduled_messages')
-          .update({
-            status: 'error',
-            last_error: resolveErr ?? 'Sem destinatários.',
-            updated_at: new Date().toISOString(),
-          })
-          .eq('id', row.id)
+    }
+  }
+
+  for (const raw of candidates ?? []) {
+    const row = raw as ScheduledRow
+    try {
+      const { data: claimed, error: claimErr } = await supabase
+        .from('scheduled_messages')
+        .update({
+          status: 'processing',
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', row.id)
+        .eq('status', 'pending')
+        .select('id')
+        .maybeSingle()
+
+      if (claimErr) {
+        console.error('[worker] Claim falhou', row.id, claimErr.message)
+        skipped += 1
+        processed += 1
+        continue
+      }
+      if (!claimed) {
+        skipped += 1
         processed += 1
         continue
       }
 
-      const sendResults: SendEvolutionResult[] = []
-      for (const recipient of targets) {
-        try {
-          const r = await sendOne(evolution, row, recipient)
-          sendResults.push(r)
-        } catch (e) {
-          const msg = e instanceof Error ? e.message : String(e)
-          sendResults.push({ ok: false, error: msg, messageId: null })
+      try {
+        const { targets, error: resolveErr } = await resolveRecipientPhones(
+          supabase,
+          row,
+        )
+        if (resolveErr || targets.length === 0) {
+          await marcarErroNaLinha(
+            row.id,
+            resolveErr ?? 'Sem destinatários.',
+          )
+          processed += 1
+          continue
         }
-      }
 
-      const oks = sendResults.filter((r) => r.ok)
-      const fails = sendResults.filter((r) => !r.ok)
+        const sendResults: SendEvolutionResult[] = []
+        for (const recipient of targets) {
+          try {
+            const r = await sendOne(evolution, row, recipient)
+            sendResults.push(r)
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e)
+            sendResults.push({ ok: false, error: msg, messageId: null })
+          }
+        }
 
-      if (oks.length === sendResults.length) {
-        const ids = oks
-          .map((r) => r.messageId)
-          .filter((x): x is string => Boolean(x))
-        await supabase
-          .from('scheduled_messages')
-          .update({
-            status: 'sent',
-            evolution_message_id: ids.length ? ids.join(',') : null,
-            last_error: null,
-            updated_at: new Date().toISOString(),
-          })
-          .eq('id', row.id)
-      } else if (oks.length > 0) {
-        const failText = fails
-          .map((f) => f.error ?? 'Erro')
-          .join(' | ')
-        await supabase
-          .from('scheduled_messages')
-          .update({
-            status: 'error',
-            evolution_message_id: oks
-              .map((r) => r.messageId)
-              .filter(Boolean)
-              .join(','),
-            last_error: `Parcial: ${oks.length} ok, ${fails.length} falha(s). ${failText}`.slice(
-              0,
-              4000,
-            ),
-            updated_at: new Date().toISOString(),
-          })
-          .eq('id', row.id)
-      } else {
-        const failText = fails
-          .map((f) => f.error ?? 'Erro')
-          .join(' | ')
-        await supabase
-          .from('scheduled_messages')
-          .update({
-            status: 'error',
-            evolution_message_id: null,
-            last_error: failText.slice(0, 4000),
-            updated_at: new Date().toISOString(),
-          })
-          .eq('id', row.id)
+        const oks = sendResults.filter((r) => r.ok)
+        const fails = sendResults.filter((r) => !r.ok)
+
+        if (oks.length === sendResults.length) {
+          const ids = oks
+            .map((r) => r.messageId)
+            .filter((x): x is string => Boolean(x))
+          const { error: finErr } = await supabase
+            .from('scheduled_messages')
+            .update({
+              status: 'sent',
+              evolution_message_id: ids.length ? ids.join(',') : null,
+              last_error: null,
+              updated_at: new Date().toISOString(),
+            })
+            .eq('id', row.id)
+          if (finErr) {
+            console.error('[worker] Update sent falhou', row.id, finErr.message)
+            await marcarErroNaLinha(row.id, `Envio ok, mas DB: ${finErr.message}`)
+          }
+        } else if (oks.length > 0) {
+          const failText = fails
+            .map((f) => f.error ?? 'Erro')
+            .join(' | ')
+          await supabase
+            .from('scheduled_messages')
+            .update({
+              status: 'error',
+              evolution_message_id: oks
+                .map((r) => r.messageId)
+                .filter(Boolean)
+                .join(','),
+              last_error: `Parcial: ${oks.length} ok, ${fails.length} falha(s). ${failText}`.slice(
+                0,
+                4000,
+              ),
+              updated_at: new Date().toISOString(),
+            })
+            .eq('id', row.id)
+        } else {
+          const failText = fails
+            .map((f) => f.error ?? 'Erro')
+            .join(' | ')
+          await marcarErroNaLinha(row.id, failText)
+        }
+      } catch (eProcess) {
+        const msg =
+          eProcess instanceof Error ? eProcess.message : String(eProcess)
+        console.error('[worker] Exceção no envio', row.id, msg)
+        await marcarErroNaLinha(row.id, `Exceção no envio: ${msg}`)
       }
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e)
-      await supabase
-        .from('scheduled_messages')
-        .update({
-          status: 'error',
-          last_error: `Exceção: ${msg}`.slice(0, 4000),
-          updated_at: new Date().toISOString(),
-        })
-        .eq('id', row.id)
+    } catch (eLinha) {
+      const msg = eLinha instanceof Error ? eLinha.message : String(eLinha)
+      console.error('[worker] Exceção ao processar linha', row.id, msg)
+      await marcarErroNaLinha(row.id, `Falha geral: ${msg}`)
     }
 
     processed += 1

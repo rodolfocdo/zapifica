@@ -249,34 +249,62 @@ export function NewEventModal({
       eventoCriado.user_id,
     )
 
-    if (dispatchActive && dispatchAt) {
-      const scheduledAtUtcIso = dispatchAt.toISOString()
-      console.log(
-        '[Agenda] Passo 2 — criar scheduled_messages ligado ao evento',
-        eventoCriado.id,
-        '| scheduled_at UTC:',
-        scheduledAtUtcIso,
-        '| is_active: true | user_id:',
-        ownerId,
-      )
-      const { error: smErr } = await supabase.from('scheduled_messages').insert({
-        event_id: eventoCriado.id,
-        user_id: ownerId,
-        is_active: true,
-        recipient_type: recipientType,
-        content_type: contentType,
-        message_body: messageBody.trim() || null,
-        scheduled_at: scheduledAtUtcIso,
-        status: 'pending',
-        segment_lead_ids:
-          recipientType === 'segment' ? [...segmentIds] : [],
-      })
-      if (smErr) {
-        await supabase.from('events').delete().eq('id', eventoCriado.id)
-        setSubmitting(false)
-        setError(smErr.message ?? 'Erro ao salvar o disparo agendado.')
-        return
-      }
+    /**
+     * Passo 2 (obrigatório, fluxo tipo transação com o passo 1):
+     * sempre uma linha em `scheduled_messages` ligada ao `event_id`.
+     * Com lembrete Evolution: is_active true + scheduled_at em UTC (.toISOString).
+     * Sem lembrete: stub (is_active false, cancelado) para manter 1:1 sem disparo.
+     */
+    const lembreteEvolutionLigado = Boolean(dispatchActive && dispatchAt)
+    const scheduledAtUtcIso = lembreteEvolutionLigado
+      ? dispatchAt!.toISOString()
+      : null
+
+    const mensagemAgendadaRow = lembreteEvolutionLigado
+      ? {
+          event_id: eventoCriado.id,
+          user_id: ownerId,
+          is_active: true,
+          recipient_type: recipientType,
+          content_type: contentType,
+          message_body: messageBody.trim() || null,
+          scheduled_at: scheduledAtUtcIso,
+          status: 'pending' as const,
+          segment_lead_ids:
+            recipientType === 'segment' ? [...segmentIds] : [],
+        }
+      : {
+          event_id: eventoCriado.id,
+          user_id: ownerId,
+          is_active: false,
+          recipient_type: 'personal' as const,
+          content_type: 'text' as const,
+          message_body: null,
+          scheduled_at: null,
+          status: 'cancelled' as const,
+          segment_lead_ids: [] as string[],
+        }
+
+    console.log(
+      '[Agenda] Passo 2 — scheduled_messages | event_id:',
+      eventoCriado.id,
+      '| user_id:',
+      ownerId,
+      '| is_active:',
+      mensagemAgendadaRow.is_active,
+      '| scheduled_at (UTC ISO ou null):',
+      scheduledAtUtcIso,
+    )
+
+    const { error: smErr } = await supabase
+      .from('scheduled_messages')
+      .insert(mensagemAgendadaRow)
+
+    if (smErr) {
+      await supabase.from('events').delete().eq('id', eventoCriado.id)
+      setSubmitting(false)
+      setError(smErr.message ?? 'Erro ao salvar a fila de disparo vinculada ao evento.')
+      return
     }
 
     setSubmitting(false)
