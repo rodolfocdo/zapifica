@@ -239,6 +239,7 @@ export function AgendaPage() {
   const [events, setEvents] = useState<AgendaEvent[]>([])
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState<string | null>(null)
+  const [loadErrorDetail, setLoadErrorDetail] = useState<string | null>(null)
   const [modalOpen, setModalOpen] = useState(false)
   const [modalSeed, setModalSeed] = useState<{ date: Date; hour: number }>({
     date: new Date(),
@@ -259,6 +260,7 @@ export function AgendaPage() {
   const fetchEvents = useCallback(async () => {
     setLoading(true)
     setLoadError(null)
+    setLoadErrorDetail(null)
     const rs = syncWindow.start.toISOString()
     const re = syncWindow.end.toISOString()
     const { data, error } = await supabase
@@ -272,11 +274,13 @@ export function AgendaPage() {
       .order('start_at', { ascending: true })
 
     if (error) {
+      const msg = error.message || String(error)
       setLoadError(
-        error.message.includes('relation')
-          ? 'Execute a migração SQL no Supabase para criar as tabelas da agenda.'
+        msg.includes('relation') || msg.includes('does not exist')
+          ? 'As tabelas da agenda ainda não existem neste projeto ou o app está apontando para o banco errado.'
           : 'Não foi possível carregar os eventos.',
       )
+      setLoadErrorDetail(msg)
       setEvents([])
       setLoading(false)
       return
@@ -560,7 +564,19 @@ export function AgendaPage() {
           </div>
 
           {loadError ? (
-            <div className="px-6 py-4 text-sm text-rose-700">{loadError}</div>
+            <div className="space-y-2 px-6 py-4 text-sm text-rose-800">
+              <p className="font-medium">{loadError}</p>
+              {loadErrorDetail ? (
+                <p className="rounded-lg border border-rose-200/80 bg-rose-50/90 p-3 font-mono text-xs leading-relaxed text-rose-900/90">
+                  {loadErrorDetail}
+                </p>
+              ) : null}
+              <p className="text-xs leading-relaxed text-rose-700/90">
+                Copie o texto acima (se aparecer) e envie para quem cuida do
+                Zapifica ou do Supabase — isso indica exatamente o que o servidor
+                respondeu.
+              </p>
+            </div>
           ) : null}
 
           {view === 'month' ? (

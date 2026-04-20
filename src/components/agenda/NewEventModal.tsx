@@ -322,6 +322,7 @@ export function NewEventModal({
             segment_lead_ids:
               recipientType === 'segment' ? [...segmentIds] : [],
             recipient_phone: recipientPhoneRow,
+            evolution_instance_name: 'Zapifica', // AQUI ENTROU A NOSSA CORREÇÃO
           }
         : {
             event_id: eventoCriado.id,
@@ -334,6 +335,7 @@ export function NewEventModal({
             status: 'cancelled' as const,
             segment_lead_ids: [] as string[],
             recipient_phone: null,
+            evolution_instance_name: null, // AQUI ENTROU A NOSSA CORREÇÃO
           }
 
       console.log(
@@ -347,7 +349,6 @@ export function NewEventModal({
         scheduledAtUtcIso,
       )
 
-      // `.select()` obrigatório no v2: sem ele, sucesso vem como `{ data: null, error: null }`
       const { error: erroMsg } = await supabase
         .from('scheduled_messages')
         .insert(mensagemAgendadaRow)
